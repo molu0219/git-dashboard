@@ -1,32 +1,35 @@
 # git-dashboard
 
-A terminal dashboard for developers who maintain **multiple Git repositories**.
-Gives you an instant read on every project's status without switching directories.
+A terminal dashboard for developers managing **multiple Git repositories**.
+Get an instant read on every project's status, recent commits, and planning docs — without switching directories.
 
 > **Scope:** Read-only overview. For actual Git operations (commit, merge, rebase), use your terminal or [lazygit](https://github.com/jesseduffield/lazygit).
 
 ---
 
-## What it does
+## Features
 
-| Panel | Source command | What you see |
-|-------|---------------|--------------|
-| Project list | `git branch`, `git status --porcelain` | Branch, uncommitted change count |
-| Status tab | `git status -s`, `git diff --stat` | M/A/D/U/?? indicators, staged vs unstaged |
-| Log tab | `git log --pretty=format:...` | Commit hash · message · author · relative time |
-| Graph tab | `git log --oneline --graph --decorate --all` | Branch topology (subway-map style) |
+| Tab | Key | Source | What you see |
+|-----|-----|--------|--------------|
+| Status | `1` | `git status -s`, `git diff --stat` | M/A/D/U/?? indicators, staged vs unstaged |
+| Log | `2` | `git log --pretty=format:...` | Commit hash · message · author · relative time |
+| Graph | `3` | `git log --oneline --graph --decorate --all` | Branch topology |
+| PRD | `4` | `PRD.md` | Product spec with section navigation |
+| TODO | `5` | `TODO.md` | Task list with `[ ]` `[~]` `[x]` `[-]` status colours |
+| DECISION | `6` | `DECISION.md` | Architecture decision log |
 
-**Featured projects** — pin the repos you're actively working on.
-They float to the top of the list and are persisted across sessions (`~/.git-dashboard-featured.json`).
+**Featured projects** — pin active repos to the top with `f`. Persisted across sessions.
+
+**Section jump** — press `n` / `p` inside any doc tab to jump between `##` headings.
 
 ---
 
 ## When is this useful?
 
 - You have 5+ repos open at once and want a single pane of glass
-- You want to quickly spot which repos have uncommitted work before ending a session
-- You're context-switching and need to remember which branch each project is on
-- Team standup or PR review — quickly check recent commit history across repos
+- Quickly spot which repos have uncommitted work before ending a session
+- Context-switching — instantly see which branch each project is on
+- Check recent commit history or planning docs without opening an editor
 
 ---
 
@@ -35,12 +38,14 @@ They float to the top of the list and are persisted across sessions (`~/.git-das
 Requires **Python 3.8+**
 
 ```bash
-# Create a virtual environment
 python3 -m venv ~/.git-dashboard-venv
 ~/.git-dashboard-venv/bin/pip install textual
+```
 
-# Clone or download dashboard.py, then add alias to ~/.bashrc
-echo "alias gitdash='~/.git-dashboard-venv/bin/python3 /path/to/dashboard.py'" >> ~/.bashrc
+Add alias to `~/.bashrc`:
+
+```bash
+alias gitdash='~/.git-dashboard-venv/bin/python3 /path/to/dashboard.py'
 source ~/.bashrc
 ```
 
@@ -48,31 +53,53 @@ source ~/.bashrc
 
 ## Configuration
 
-Open `dashboard.py` and set `PROJECTS_DIR` to your projects root:
+Set `PROJECTS_DIR` at the top of `dashboard.py` to your projects root:
 
 ```python
 PROJECTS_DIR = Path("/path/to/your/projects")
 ```
 
-All subdirectories containing a `.git` folder will appear in the list automatically.
+All subdirectories containing a `.git` folder appear automatically.
+
+Featured selections are saved to `~/.git-dashboard-featured.json`.
 
 ---
 
-## Usage
+## Project doc conventions
 
-```bash
-gitdash
-```
+Place these files in any project root to unlock the doc tabs:
 
-### Keybindings
+| File | Purpose |
+|------|---------|
+| `PRD.md` | Product spec / feature definitions |
+| `TODO.md` | Task list using `[ ]` `[~]` `[x]` `[-]` `[R]` markers |
+| `DECISION.md` | Architecture decision log |
+
+### TODO status markers
+
+| Marker | Meaning |
+|--------|---------|
+| `[ ]` | Not started |
+| `[~]` | In progress |
+| `[R]` | Ready for review |
+| `[x]` | Done |
+| `[-]` | On hold |
+
+---
+
+## Keybindings
 
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate project list |
 | `f` | Toggle ★ Featured on selected project |
-| `1` | Status tab — file-level changes |
-| `2` | Log tab — recent commit history |
-| `3` | Graph tab — branch topology |
+| `1` | Status tab |
+| `2` | Log tab |
+| `3` | Graph tab |
+| `4` | PRD tab |
+| `5` | TODO tab |
+| `6` | DECISION tab |
+| `n` / `p` | Jump to next / previous section in doc tabs |
 | `r` | Refresh all projects |
 | `q` | Quit |
 
@@ -81,22 +108,21 @@ gitdash
 ## Layout
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Git Dashboard                              12:34:56          │
-├──────────────────┬──────────────────────────────────────────┤
-│  ★ FEATURED      │ ┌ Status ┐ Log   Graph                   │
-│  ★ token-analysis│ │                                        │
-│  ★ polymarket    │ │ token-analysis  branch: dev            │
-│  ─ PROJECTS      │ │                                        │
-│    personal-web  │ │ ✓ Working tree clean                   │
-│    polymarket-cli│ │                                        │
-│                  │ │ Recent commits:                        │
-│                  │ │  a1b2c3 Add signal panel               │
-│                  │ │         Joey · 2 hours ago             │
-│                  │ │                                        │
-├──────────────────┴──────────────────────────────────────────┤
-│  ↑↓  navigate   f  toggle ★   1  status   2  log   3  graph │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Git Dashboard                                    12:34:56     │
+├──────────────────┬───────────────────────────────────────────┤
+│  ★ FEATURED      │ Status[1] Log[2] Graph[3] PRD[4] ...      │
+│  ★ token-analysis│                                           │
+│  ★ polymarket    │  token-analysis  branch: dev              │
+│  ─ PROJECTS      │                                           │
+│    personal-web  │  ✓ Working tree clean                     │
+│    polymarket-cli│                                           │
+│                  │  Recent commits:                          │
+│                  │   a1b2c3 Add signal panel                 │
+│                  │           Joey · 2 hours ago              │
+├──────────────────┴───────────────────────────────────────────┤
+│ ↑↓ nav  f ★  1 status  2 log  3 graph  4 PRD  5 TODO  q quit │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -110,4 +136,4 @@ gitdash
 | `D` | Deleted |
 | `U` | Merge conflict |
 | `??` | Untracked |
-| `✓` | Clean — nothing to commit |
+| `✓` | Clean |

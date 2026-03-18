@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Label, Static, ListView, ListItem, TabbedContent, TabPane
+from textual.widgets import Header, Footer, Label, Static, ListView, ListItem, TabbedContent, TabPane
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.binding import Binding
 from textual import on
@@ -237,6 +237,10 @@ class GitDashboard(App):
     CSS = """
     Screen { background: #080c18; }
     Header { background: #0f1428; color: #00d4ff; }
+    Footer { background: #0f1428; }
+    Footer > .footer--key { background: #1e2540; color: #00d4ff; }
+    Footer > .footer--description { color: #778; }
+    Footer > .footer--highlight { background: #2a3560; color: #fff; }
 
     #left-panel {
         width: 38;
@@ -259,41 +263,21 @@ class GitDashboard(App):
     TabbedContent { background: #0b0f1e; }
     TabPane { padding: 1 2; background: #0b0f1e; color: #c0c8e0; }
     StatusTab, LogTab, GraphTab, DocTab { color: #c0c8e0; }
-
-    #keys-bar {
-        height: 1;
-        background: #0f1428;
-        padding: 0 1;
-    }
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("f", "toggle_featured", "★ Featured"),
-        Binding("1", "show_tab", "tab-status"),
-        Binding("2", "show_tab", "tab-log"),
-        Binding("3", "show_tab", "tab-graph"),
-        Binding("4", "show_tab", "tab-prd"),
-        Binding("5", "show_tab", "tab-todo"),
-        Binding("6", "show_tab", "tab-decision"),
-        Binding("r", "refresh_all", "Refresh"),
-        Binding("]", "section_next", "Next §"),
-        Binding("[", "section_prev", "Prev §"),
+        Binding("q", "quit", "Quit", show=True),
+        Binding("f", "toggle_featured", "★ Featured", show=True),
+        Binding("1", "show_tab", "Status", show=True),
+        Binding("2", "show_tab", "Log", show=True),
+        Binding("3", "show_tab", "Graph", show=True),
+        Binding("4", "show_tab", "PRD", show=True),
+        Binding("5", "show_tab", "TODO", show=True),
+        Binding("6", "show_tab", "DECISION", show=True),
+        Binding("r", "refresh_all", "Refresh", show=True),
+        Binding("n", "section_next", "Next section", show=True),
+        Binding("p", "section_prev", "Prev section", show=True),
     ]
-
-    _KEYS_TEXT = (
-        " [bold cyan on #1e2540] ↑↓ [/] [#778]nav[/#778]"
-        "  [bold cyan on #1e2540] f [/] [#778]★ featured[/#778]"
-        "  [bold cyan on #1e2540] 1 [/] [#778]status[/#778]"
-        "  [bold cyan on #1e2540] 2 [/] [#778]log[/#778]"
-        "  [bold cyan on #1e2540] 3 [/] [#778]graph[/#778]"
-        "  [bold cyan on #1e2540] 4 [/] [#778]PRD[/#778]"
-        "  [bold cyan on #1e2540] 5 [/] [#778]TODO[/#778]"
-        "  [bold cyan on #1e2540] 6 [/] [#778]DECISION[/#778]"
-        "  [bold cyan on #1e2540] ]/[ [/] [#778]next/prev §[/#778]"
-        "  [bold cyan on #1e2540] r [/] [#778]refresh[/#778]"
-        "  [bold cyan on #1e2540] q [/] [#778]quit[/#778]"
-    )
 
     def __init__(self):
         super().__init__()
@@ -328,7 +312,7 @@ class GitDashboard(App):
                     with TabPane("DECISION [6]", id="tab-decision"):
                         with ScrollableContainer(id="scroll-decision"):
                             yield DocTab("DECISION", id="decision-view", markup=True)
-        yield Static(self._KEYS_TEXT, id="keys-bar", markup=True)
+        yield Footer()
 
     def on_mount(self):
         self.title = "Git Dashboard"
@@ -401,9 +385,9 @@ class GitDashboard(App):
                    "4": "tab-prd", "5": "tab-todo", "6": "tab-decision"}
         if event.key in tab_map:
             self.query_one("#tabs", TabbedContent).active = tab_map[event.key]
-        elif event.key == "]":
+        elif event.key == "n":
             self._active_doc_tab_action("jump_next")
-        elif event.key == "[":
+        elif event.key == "p":
             self._active_doc_tab_action("jump_prev")
 
     def _active_doc_tab_action(self, method: str):
