@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Label, Static, ListView, ListItem, TabbedContent, TabPane
+from textual.widgets import Header, Footer, Label, Static, ListView, ListItem, TabbedContent, TabPane, Rule
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -184,7 +184,18 @@ class GitDashboard(App):
     CSS = """
     Screen { background: #080c18; }
     Header { background: #0f1428; color: #00d4ff; }
-    Footer { background: #0f1428; color: #555; }
+    Footer {
+        background: #0f1428;
+        color: #aab;
+    }
+    Footer > .footer--key {
+        background: #1e2540;
+        color: #00d4ff;
+    }
+    Footer > .footer--highlight {
+        background: #2a3560;
+        color: #ffffff;
+    }
 
     #left-panel {
         width: 38;
@@ -219,15 +230,31 @@ class GitDashboard(App):
     TabPane { padding: 1 2; background: #0b0f1e; color: #c0c8e0; }
 
     StatusTab, LogTab, GraphTab { color: #c0c8e0; }
+
+    #keys-bar {
+        height: 1;
+        background: #0f1428;
+        color: #556;
+        padding: 0 1;
+    }
+    .key-hint-key {
+        background: #1e2540;
+        color: #00d4ff;
+        padding: 0 1;
+    }
+    .key-hint-desc {
+        color: #778;
+        padding: 0 1 0 0;
+    }
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("f", "toggle_featured", "★ Featured"),
-        Binding("r", "refresh_all", "Refresh"),
-        Binding("1", "show_tab_status", "Status"),
-        Binding("2", "show_tab_log", "Log"),
-        Binding("3", "show_tab_graph", "Graph"),
+        Binding("q", "quit", "Quit", show=True),
+        Binding("f", "toggle_featured", "★ Featured", show=True),
+        Binding("r", "refresh_all", "Refresh", show=True),
+        Binding("1", "show_tab_status", "Status", show=True),
+        Binding("2", "show_tab_log", "Log", show=True),
+        Binding("3", "show_tab_graph", "Graph", show=True),
     ]
 
     def __init__(self):
@@ -253,7 +280,16 @@ class GitDashboard(App):
                     with TabPane("Graph [3]", id="tab-graph"):
                         with ScrollableContainer():
                             yield GraphTab(id="graph-view", markup=True)
-        yield Footer()
+        yield Static(
+            " [on #1e2540][#00d4ff] ↑↓ [/][/#00d4ff][/on #1e2540][#778] navigate [/#778]"
+            "  [on #1e2540][#00d4ff] f [/][/#00d4ff][/on #1e2540][#778] toggle ★ featured [/#778]"
+            "  [on #1e2540][#00d4ff] 1 [/][/#00d4ff][/on #1e2540][#778] status [/#778]"
+            "  [on #1e2540][#00d4ff] 2 [/][/#00d4ff][/on #1e2540][#778] log [/#778]"
+            "  [on #1e2540][#00d4ff] 3 [/][/#00d4ff][/on #1e2540][#778] graph [/#778]"
+            "  [on #1e2540][#00d4ff] r [/][/#00d4ff][/on #1e2540][#778] refresh [/#778]"
+            "  [on #1e2540][#00d4ff] q [/][/#00d4ff][/on #1e2540][#778] quit [/#778]",
+            id="keys-bar", markup=True
+        )
 
     def on_mount(self):
         self.title = "Git Dashboard"
