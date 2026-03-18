@@ -18,10 +18,13 @@ When you're working with AI coding assistants — Claude Code, Cursor, Copilot, 
 | PRD | `4` | `PRD.md` | Product spec with section navigation |
 | TODO | `5` | `TODO.md` | Task list with `[ ]` `[~]` `[x]` `[-]` status colours |
 | DECISION | `6` | `DECISION.md` | Architecture decision log |
+| Tokens | `7` | `~/.claude/projects/*.jsonl` | Claude token usage and cost per project |
 
 **Featured projects** — pin active repos to the top with `f`. Persisted across sessions.
 
 **Section jump** — press `n` / `p` inside any doc tab to jump between `##` headings.
+
+**Token tab** — press `7` to see Claude token usage and cost. Shows global summary across all projects or per-project detail (input, output, cache) when a project is selected. Includes commit-to-cost correlation: each git commit is mapped to the Claude sessions that preceded it, so you can see how much AI usage went into each commit.
 
 ---
 
@@ -54,13 +57,19 @@ source ~/.bashrc
 
 ## Configuration
 
-Set `PROJECTS_DIR` at the top of `dashboard.py` to your projects root:
+`PROJECTS_DIR` is resolved in priority order:
 
-```python
-PROJECTS_DIR = Path("/path/to/your/projects")
+**1. Environment variable**
+```bash
+GIT_DASHBOARD_DIR=/path/to/projects gitdash
 ```
 
-All subdirectories containing a `.git` folder appear automatically.
+**2. Config file** — create `~/.git-dashboard.json`:
+```json
+{ "projects_dir": "/path/to/your/projects" }
+```
+
+**3. Default** — current working directory when `gitdash` is run.
 
 Featured selections are saved to `~/.git-dashboard-featured.json`.
 
@@ -100,6 +109,7 @@ Place these files in any project root to unlock the doc tabs:
 | `4` | PRD tab |
 | `5` | TODO tab |
 | `6` | DECISION tab |
+| `7` | Tokens tab (Claude usage) |
 | `n` / `p` | Jump to next / previous section in doc tabs |
 | `r` | Refresh all projects |
 | `q` | Quit |

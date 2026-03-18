@@ -1,16 +1,11 @@
 # TODO — git-dashboard
 
-## In Progress
-
-[~] Stable keybinding display in Footer with command palette
-
 ## Up Next
 
 [ ] Filter project list by featured only (toggle)
 [ ] Show ahead/behind count vs remote (e.g. ↑2 ↓1)
 [ ] Stash count indicator per project
 [ ] `o` key to open project in new terminal tab
-[ ] Config file support (~/.git-dashboard.json) for PROJECTS_DIR
 
 ## Completed
 
@@ -25,6 +20,9 @@
 [x] Footer with palette and keybinding hints
 [x] Fix Rich markup errors (hex colour closing tags)
 [x] Featured / regular project section dividers
+[x] Config file support (~/.git-dashboard.json) for PROJECTS_DIR
+[x] Tokens tab — Claude session usage + cost per project
+[x] Commit-to-cost correlation in token detail view
 
 ## On Hold
 

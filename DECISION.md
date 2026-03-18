@@ -1,5 +1,15 @@
 # DECISION — git-dashboard
 
+## 2026-03-18 — Single TokenGlobal widget for both global and per-project token views
+
+**Decision:** Use one `TokenGlobal` widget that renders either global summary or per-project detail, rather than separate widgets or a split layout.
+
+**Why:** Simpler state management — the widget just re-renders when the selection changes. No need to show/hide panels or synchronize two views.
+
+**Trade-off:** Global summary is not persistent alongside per-project view, but switching is instant so this is acceptable.
+
+---
+
 ## 2026-03-18 — Use Footer widget instead of custom Static keys bar
 
 **Decision:** Replaced custom `Static` keys bar with Textual's built-in `Footer` widget.

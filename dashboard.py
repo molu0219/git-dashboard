@@ -1,16 +1,69 @@
 #!/usr/bin/env python3
-from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Label, Static, ListView, ListItem, TabbedContent, TabPane
-from textual.containers import Horizontal, Vertical, ScrollableContainer
-from textual.binding import Binding
-from textual import on
-import subprocess
+"""
+git-dashboard — terminal dashboard for managing multiple Git repositories.
+
+Configuration (in priority order):
+  1. Environment variable:  GIT_DASHBOARD_DIR=/path/to/projects gitdash
+  2. Config file:           ~/.git-dashboard.json  →  { "projects_dir": "/path" }
+  3. Default:               current working directory
+"""
+import os
 import json
 import re
+import subprocess
 from pathlib import Path
 
-PROJECTS_DIR = Path("/mnt/c/Users/Joey Chen/Desktop/Joey/Blockchain/claude code")
+from rich.markup import escape
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, ScrollableContainer
+from textual.widgets import Footer, Header, Label, ListItem, ListView, Static, TabbedContent, TabPane
+
+
+# ── config ────────────────────────────────────────────────────────────────────
+
+CONFIG_FILE = Path.home() / ".git-dashboard.json"
 FEATURED_FILE = Path.home() / ".git-dashboard-featured.json"
+
+
+def load_config() -> Path:
+    if "GIT_DASHBOARD_DIR" in os.environ:
+        return Path(os.environ["GIT_DASHBOARD_DIR"]).expanduser()
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text())
+            if "projects_dir" in cfg:
+                return Path(cfg["projects_dir"]).expanduser()
+        except Exception:
+            pass
+    return Path.cwd()
+
+
+PROJECTS_DIR = load_config()
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+# Token pricing per million (claude-sonnet-4-6) — update if model changes
+TOKEN_PRICE = {
+    "input": 3.00, "output": 15.00,
+    "cache_create": 3.75, "cache_read": 0.30,
+}
+
+
+def load_featured() -> set:
+    if FEATURED_FILE.exists():
+        try:
+            return set(json.loads(FEATURED_FILE.read_text()))
+        except Exception:
+            pass
+    return set()
+
+
+def save_featured(featured: set):
+    FEATURED_FILE.write_text(json.dumps(list(featured)))
+
+
+# ── git helpers ───────────────────────────────────────────────────────────────
 
 STATUS_COLORS = {
     "M": "yellow", "A": "green", "D": "red",
@@ -22,30 +75,27 @@ STATUS_LABELS = {
 }
 
 
-# ── persistence ──────────────────────────────────────────────────────────────
+def get_projects() -> list[Path]:
+    try:
+        return sorted(
+            [d for d in PROJECTS_DIR.iterdir() if d.is_dir() and (d / ".git").exists()],
+            key=lambda x: x.name,
+        )
+    except Exception:
+        return []
 
-def load_featured():
-    if FEATURED_FILE.exists():
-        return set(json.loads(FEATURED_FILE.read_text()))
-    return set()
 
-def save_featured(featured: set):
-    FEATURED_FILE.write_text(json.dumps(list(featured)))
+def run_git(path: Path, args: list[str]) -> str:
+    try:
+        r = subprocess.run(
+            ["git"] + args, cwd=path, capture_output=True, text=True, timeout=10
+        )
+        return r.stdout.strip()
+    except Exception:
+        return ""
 
 
-# ── git helpers ───────────────────────────────────────────────────────────────
-
-def get_projects():
-    return sorted(
-        [d for d in PROJECTS_DIR.iterdir() if d.is_dir() and (d / ".git").exists()],
-        key=lambda x: x.name,
-    )
-
-def run_git(path, args):
-    r = subprocess.run(["git"] + args, cwd=path, capture_output=True, text=True)
-    return r.stdout.strip()
-
-def get_project_info(path):
+def get_project_info(path: Path) -> dict:
     branch = run_git(path, ["branch", "--show-current"])
     porcelain = run_git(path, ["status", "--porcelain"])
     status_lines = [(l[:2], l[3:]) for l in porcelain.splitlines() if len(l) >= 2]
@@ -59,8 +109,197 @@ def get_project_info(path):
         "log_pretty": run_git(path, ["log", "--pretty=format:%h|%an|%ar|%s", "-10"]),
     }
 
-def format_status_line(xy, fname):
-    from rich.markup import escape
+
+# ── token consumption helpers ─────────────────────────────────────────────────
+
+def _decode_project_name(dir_name: str) -> str:
+    skip = {"mnt", "c", "d", "e", "Users", "home", "usr", "Desktop", "Documents", "AppData", "Local"}
+    parts = dir_name.lstrip("-").split("-")
+    meaningful = [p for p in parts if p and p not in skip]
+    if not meaningful:
+        return dir_name
+    return "/".join(meaningful[-2:]) if len(meaningful) >= 2 else meaningful[-1]
+
+
+def _compute_cost(usage: dict) -> float:
+    return sum(usage.get(k, 0) / 1_000_000 * TOKEN_PRICE[k] for k in TOKEN_PRICE)
+
+
+def _fmt_tok(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}k"
+    return str(n)
+
+
+def find_project_claude_dir(project_name: str) -> Path | None:
+    """Match a project folder name to its ~/.claude/projects/ directory."""
+    if not CLAUDE_PROJECTS_DIR.exists():
+        return None
+    # Exact suffix match first (most reliable)
+    for d in CLAUDE_PROJECTS_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        if d.name.endswith(f"-{project_name}") or d.name == project_name:
+            return d
+    # Fallback: decoded name contains project name
+    for d in CLAUDE_PROJECTS_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        if project_name in _decode_project_name(d.name):
+            return d
+    return None
+
+
+def _parse_jsonl_dir(project_dir: Path) -> tuple[dict, dict[str, int], list[dict]]:
+    """Returns (usage_totals, tool_counts, sessions_list)."""
+    usage = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
+    tools: dict[str, int] = {}
+    sessions = []
+
+    for fpath in set(list(project_dir.glob("*.jsonl")) + list(project_dir.glob("**/*.jsonl"))):
+        s_usage = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
+        s_tools: dict[str, int] = {}
+        s_ts = None
+        try:
+            with open(fpath, errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = obj.get("timestamp")
+                    if ts and (s_ts is None or ts > s_ts):
+                        s_ts = ts
+                    if obj.get("type") == "assistant":
+                        u = obj.get("message", {}).get("usage", {})
+                        s_usage["input"] += u.get("input_tokens", 0)
+                        s_usage["output"] += u.get("output_tokens", 0)
+                        s_usage["cache_create"] += u.get("cache_creation_input_tokens", 0)
+                        s_usage["cache_read"] += u.get("cache_read_input_tokens", 0)
+                        for c in obj.get("message", {}).get("content", []):
+                            if isinstance(c, dict) and c.get("type") == "tool_use":
+                                n = c.get("name", "?")
+                                s_tools[n] = s_tools.get(n, 0) + 1
+        except Exception:
+            continue
+
+        if sum(s_usage.values()) == 0:
+            continue
+
+        for k in usage:
+            usage[k] += s_usage[k]
+        for t, c in s_tools.items():
+            tools[t] = tools.get(t, 0) + c
+
+        sessions.append({
+            "file": fpath.name,
+            "usage": s_usage,
+            "cost": _compute_cost(s_usage),
+            "tools": s_tools,
+            "date": s_ts[:16].replace("T", " ") if s_ts else "—",
+            "raw_ts": s_ts or "",
+        })
+
+    sessions.sort(key=lambda x: x["date"], reverse=True)
+    return usage, tools, sessions
+
+
+def _correlate_commits(project_path: Path, sessions: list[dict]) -> list[dict]:
+    """Map each session to the next git commit after it, group by commit."""
+    raw = run_git(project_path, ["log", "--format=%h|%s|%aI", "-80"])
+    if not raw:
+        return []
+
+    commits = []
+    for line in raw.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) == 3:
+            sha, msg, ts = parts
+            commits.append({"sha": sha, "msg": msg.strip(), "ts": ts.strip()})
+    # Sort oldest → newest for matching
+    commits.sort(key=lambda x: x["ts"])
+
+    # For each session find first commit with ts >= session raw_ts
+    groups: dict[str, dict] = {}
+    for s in sessions:
+        if not s["raw_ts"]:
+            continue
+        matched = next((c for c in commits if c["ts"] >= s["raw_ts"]), None)
+        key = matched["sha"] if matched else "__uncommitted__"
+        label = matched["msg"] if matched else "(uncommitted work)"
+        if key not in groups:
+            groups[key] = {"sha": key[:7] if matched else "—", "msg": label, "sessions": 0, "cost": 0.0,
+                           "input": 0, "output": 0}
+        groups[key]["sessions"] += 1
+        groups[key]["cost"] += s["cost"]
+        groups[key]["input"] += s["usage"]["input"]
+        groups[key]["output"] += s["usage"]["output"]
+
+    return sorted(groups.values(), key=lambda x: -x["cost"])
+
+
+def parse_project_detail(project_name: str) -> dict | None:
+    d = find_project_claude_dir(project_name)
+    if not d:
+        return None
+    usage, tools, sessions = _parse_jsonl_dir(d)
+    project_path = PROJECTS_DIR / project_name
+    commits_cost = _correlate_commits(project_path, sessions) if project_path.exists() else []
+    return {
+        "name": project_name,
+        "usage": usage,
+        "cost": _compute_cost(usage),
+        "tools": dict(sorted(tools.items(), key=lambda x: -x[1])[:10]),
+        "sessions": sessions,
+        "commits_cost": commits_cost,
+    }
+
+
+def parse_token_data() -> dict:
+    if not CLAUDE_PROJECTS_DIR.exists():
+        return {"error": f"{CLAUDE_PROJECTS_DIR} not found"}
+
+    all_projects = []
+    g_usage = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
+    g_tools: dict[str, int] = {}
+    g_sessions = 0
+
+    for project_dir in sorted(CLAUDE_PROJECTS_DIR.iterdir()):
+        if not project_dir.is_dir():
+            continue
+        usage, tools, sessions = _parse_jsonl_dir(project_dir)
+        if sum(usage.values()) == 0:
+            continue
+        for k in g_usage:
+            g_usage[k] += usage[k]
+        for t, c in tools.items():
+            g_tools[t] = g_tools.get(t, 0) + c
+        g_sessions += len(sessions)
+        latest_ts = sessions[0]["date"] if sessions else None
+        all_projects.append({
+            "name": _decode_project_name(project_dir.name),
+            "usage": usage,
+            "cost": _compute_cost(usage),
+            "sessions": len(sessions),
+            "latest_ts": latest_ts,
+        })
+
+    all_projects.sort(key=lambda x: -x["cost"])
+    return {
+        "global": g_usage,
+        "total_cost": _compute_cost(g_usage),
+        "sessions": g_sessions,
+        "tools": dict(sorted(g_tools.items(), key=lambda x: -x[1])[:10]),
+        "projects": all_projects,
+    }
+
+
+def format_status_line(xy: str, fname: str) -> str:
     x, y = xy[0], xy[1]
     key = x if x != " " else y
     color = STATUS_COLORS.get(key, "white")
@@ -70,13 +309,13 @@ def format_status_line(xy, fname):
     return f"[{color}]{sx}{sy} {label}[/{color}]  {escape(fname)}"
 
 
-# ── markdown helpers ──────────────────────────────────────────────────────────
+# ── markdown renderer ─────────────────────────────────────────────────────────
 
 def render_md(text: str) -> tuple[str, list[tuple[int, str]]]:
-    """Return (rich_markup_string, [(line_index, heading_text), ...])"""
-    from rich.markup import escape
-    lines_out = []
-    headings = []
+    """Returns (rich_markup_string, [(line_index, heading_text), ...])"""
+    lines_out: list[str] = []
+    headings: list[tuple[int, str]] = []
+
     for line in text.splitlines():
         m = re.match(r'^(#{1,3})\s+(.*)', line)
         if m:
@@ -84,40 +323,49 @@ def render_md(text: str) -> tuple[str, list[tuple[int, str]]]:
             title = escape(m.group(2))
             headings.append((len(lines_out), m.group(2)))
             if level == 1:
-                lines_out.append(f"[bold cyan]{'━' * 40}[/bold cyan]")
-                lines_out.append(f"[bold cyan]  {title}[/bold cyan]")
-                lines_out.append(f"[bold cyan]{'━' * 40}[/bold cyan]")
+                lines_out.append(f"[bold cyan]{'━' * 40}[/]")
+                lines_out.append(f"[bold cyan]  {title}[/]")
+                lines_out.append(f"[bold cyan]{'━' * 40}[/]")
             elif level == 2:
-                lines_out.append(f"[bold yellow]  ▸ {title}[/bold yellow]")
+                lines_out.append(f"[bold yellow]  ▸ {title}[/]")
             else:
-                lines_out.append(f"[yellow]    • {title}[/yellow]")
+                lines_out.append(f"[yellow]    • {title}[/]")
         elif line.startswith("- ") or line.startswith("* "):
-            lines_out.append(f"[dim]  ·[/dim] {escape(line[2:])}")
+            lines_out.append(f"[dim]  ·[/] {escape(line[2:])}")
         elif re.match(r'^\[(.)\]', line):
-            # TODO-style checkboxes
             m2 = re.match(r'^\[(.)\]\s*(.*)', line)
             if m2:
-                mark, rest = m2.group(1), escape(m2.group(2))
-                colors = {"x": "green", "~": "cyan", "R": "yellow", "-": "dim", " ": "white"}
-                c = colors.get(mark, "white")
-                lines_out.append(f"  [{c}][{mark}] {rest}[/{c}]")
+                mark = m2.group(1)
+                rest = escape(m2.group(2))
+                c = {"x": "green", "~": "cyan", "R": "yellow", "-": "dim", " ": "white"}.get(mark, "white")
+                lines_out.append(f"  [{c}][{mark}] {rest}[/]")
         elif line.startswith("|"):
-            lines_out.append(f"[dim]{escape(line)}[/dim]")
+            lines_out.append(f"[dim]{escape(line)}[/]")
         elif line.startswith("```"):
-            lines_out.append(f"[dim]{escape(line)}[/dim]")
+            lines_out.append(f"[dim]{escape(line)}[/]")
         elif line.startswith(">"):
-            lines_out.append(f"[italic dim]{escape(line)}[/italic dim]")
+            lines_out.append(f"[dim italic]{escape(line)}[/]")
         elif line == "---":
-            lines_out.append("[dim]─────────────────────────────────────[/dim]")
+            lines_out.append("[dim]─────────────────────────────────────[/]")
         else:
             lines_out.append(escape(line))
+
     return "\n".join(lines_out), headings
 
 
 # ── widgets ───────────────────────────────────────────────────────────────────
 
+class SectionHeader(ListItem):
+    def __init__(self, text: str):
+        super().__init__(disabled=True)
+        self._text = text
+
+    def compose(self) -> ComposeResult:
+        yield Label(self._text, markup=True)
+
+
 class ProjectItem(ListItem):
-    def __init__(self, name, branch, changes, featured):
+    def __init__(self, name: str, branch: str, changes: int, featured: bool):
         super().__init__()
         self.project_name = name
         self.branch = branch
@@ -125,20 +373,22 @@ class ProjectItem(ListItem):
         self.featured = featured
 
     def compose(self) -> ComposeResult:
+        yield Label(self._make_label(), markup=True)
+
+    def _make_label(self) -> str:
         star = "[gold1]★[/gold1]" if self.featured else " "
         change_str = f"[red]{self.changes}![/red]" if self.changes > 0 else "[green]✓[/green]"
         bc = "cyan" if self.branch == "dev" else "yellow" if self.branch == "main" else "white"
-        yield Label(
-            f" {star} {self.project_name:<22} [{bc}]{self.branch:<6}[/{bc}] {change_str}",
-            markup=True,
-        )
+        return f" {star} {self.project_name:<22} [{bc}]{self.branch:<6}[/{bc}] {change_str}"
+
+    def refresh_label(self):
+        self.query_one(Label).update(self._make_label())
 
 
 class StatusTab(Static):
-    def update_info(self, name, info):
-        from rich.markup import escape
+    def update_info(self, name: str, info: dict):
         bc = "cyan" if info["branch"] == "dev" else "yellow"
-        lines = [f"[bold white]{name}[/bold white]  [{bc}]{info['branch']}[/{bc}]", ""]
+        lines = [f"[bold]{escape(name)}[/bold]  [{bc}]{info['branch']}[/{bc}]", ""]
         if not info["status_lines"]:
             lines.append("[green]✓ Working tree clean[/green]")
         else:
@@ -157,15 +407,15 @@ class StatusTab(Static):
 
 
 class LogTab(Static):
-    def update_info(self, info):
+    def update_info(self, info: dict):
         lines = ["[bold]Recent Commits:[/bold]", ""]
         if info["log_pretty"]:
             for entry in info["log_pretty"].splitlines():
                 parts = entry.split("|", 3)
                 if len(parts) == 4:
                     sha, author, when, msg = parts
-                    lines.append(f"  [dim]{sha}[/dim] [cyan]{msg}[/cyan]")
-                    lines.append(f"         [dim]{author} · {when}[/dim]")
+                    lines.append(f"  [dim]{escape(sha)}[/dim] [cyan]{escape(msg)}[/cyan]")
+                    lines.append(f"         [dim]{escape(author)} · {escape(when)}[/dim]")
                     lines.append("")
         else:
             lines.append("  [dim](no commits)[/dim]")
@@ -173,12 +423,11 @@ class LogTab(Static):
 
 
 class GraphTab(Static):
-    def update_info(self, info):
-        from rich.markup import escape
+    def update_info(self, info: dict):
         lines = ["[bold]Branch Graph:[/bold]", ""]
         for l in (info["graph_log"].splitlines() if info["graph_log"] else []):
-            safe = escape(l)
-            safe = safe.replace("\\*", "[cyan]*[/cyan]")
+            # escape first, then highlight commit markers
+            safe = escape(l).replace("*", "[cyan]*[/cyan]")
             lines.append(f"  {safe}")
         if not info["graph_log"]:
             lines.append("  [dim](no history)[/dim]")
@@ -186,23 +435,23 @@ class GraphTab(Static):
 
 
 class DocTab(Static):
-    """Displays PRD / TODO / DECISION markdown with section jump support."""
-
     def __init__(self, doc_id: str, **kwargs):
         super().__init__(**kwargs)
         self._doc_id = doc_id
         self._headings: list[tuple[int, str]] = []
         self._heading_idx = 0
-        self._project_path: Path | None = None
 
     def load(self, project_path: Path):
-        self._project_path = project_path
         md_file = project_path / f"{self._doc_id}.md"
         if not md_file.exists():
-            self.update(f"[dim]No {self._doc_id}.md found in this project.[/dim]")
+            self.update(f"[dim]No {self._doc_id}.md in this project.[/dim]")
             self._headings = []
             return
-        text = md_file.read_text(encoding="utf-8")
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except Exception as e:
+            self.update(f"[red]Error reading file: {escape(str(e))}[/red]")
+            return
         rendered, headings = render_md(text)
         self._headings = headings
         self._heading_idx = 0
@@ -221,14 +470,108 @@ class DocTab(Static):
         self._scroll_to_heading()
 
     def _scroll_to_heading(self):
-        # Scroll the parent ScrollableContainer to the heading line
         line_no, _ = self._headings[self._heading_idx]
         try:
-            container = self.parent
-            if hasattr(container, "scroll_to"):
-                container.scroll_to(y=line_no, animate=False)
+            if hasattr(self.parent, "scroll_to"):
+                self.parent.scroll_to(y=line_no, animate=False)
         except Exception:
             pass
+
+
+
+class TokenGlobal(Static):
+    def show_loading(self):
+        self.update("[dim]Loading…[/dim]")
+
+    def _usage_lines(self, usage: dict, total_cost: float) -> list[str]:
+        return [
+            f"  [yellow]Input        {_fmt_tok(usage['input']):>8}[/yellow]  [dim]${usage['input']/1e6*TOKEN_PRICE['input']:.4f}[/dim]",
+            f"  [green]Output       {_fmt_tok(usage['output']):>8}[/green]  [dim]${usage['output']/1e6*TOKEN_PRICE['output']:.4f}[/dim]",
+            f"  [blue]Cache write  {_fmt_tok(usage['cache_create']):>8}[/blue]  [dim]${usage['cache_create']/1e6*TOKEN_PRICE['cache_create']:.4f}[/dim]",
+            f"  [cyan]Cache read   {_fmt_tok(usage['cache_read']):>8}[/cyan]  [dim]${usage['cache_read']/1e6*TOKEN_PRICE['cache_read']:.4f}[/dim]",
+            f"  [bold magenta]Total cost   {'${:.4f}'.format(total_cost):>8}[/bold magenta]",
+        ]
+
+    def _tools_lines(self, tools: dict) -> list[str]:
+        if not tools:
+            return []
+        max_c = max(tools.values())
+        lines = ["", "[bold]Top Tools[/bold]"]
+        for tool, count in tools.items():
+            bar = "█" * int(count / max_c * 16)
+            lines.append(f"  [cyan]{escape(tool):<26}[/cyan] [dim]{count:>4}  {bar}[/dim]")
+        return lines
+
+    def load_global(self, data: dict):
+        if "error" in data:
+            self.update(f"[red]{escape(data['error'])}[/red]")
+            return
+        g = data["global"]
+        lines = [
+            f"[bold cyan]Global Summary[/bold cyan]  [dim]{data['sessions']} sessions · {len(data['projects'])} projects[/dim]",
+            "[dim]Select a project on the left to see its detail.[/dim]",
+            "",
+        ]
+        lines += self._usage_lines(g, data["total_cost"])
+        lines += self._tools_lines(data["tools"])
+
+        if data["projects"]:
+            lines += ["", "[bold]All Projects  (by cost)[/bold]",
+                      f"[dim]  {'Project':<26} {'Input':>7} {'Output':>7} {'Cost':>9} {'Sessions':>5}[/dim]",
+                      f"[dim]  {'─'*26} {'─'*7} {'─'*7} {'─'*9} {'─'*5}[/dim]"]
+            for p in data["projects"]:
+                u = p["usage"]
+                lines.append(
+                    f"  [cyan]{escape(p['name']):<26}[/cyan]"
+                    f" [yellow]{_fmt_tok(u['input']):>7}[/yellow]"
+                    f" [green]{_fmt_tok(u['output']):>7}[/green]"
+                    f" [magenta]{'${:.4f}'.format(p['cost']):>9}[/magenta]"
+                    f" [dim]{p['sessions']:>5}[/dim]"
+                )
+        self.update("\n".join(lines))
+
+    def load_project(self, detail: dict | None, project_name: str):
+        if detail is None:
+            self.update(f"[dim]No Claude session data found for[/dim] [cyan]{escape(project_name)}[/cyan]")
+            return
+        lines = [
+            f"[bold cyan]{escape(detail['name'])}[/bold cyan]  [dim]{len(detail['sessions'])} sessions[/dim]",
+            "",
+        ]
+        lines += self._usage_lines(detail["usage"], detail["cost"])
+        lines += self._tools_lines(detail["tools"])
+
+        if detail.get("commits_cost"):
+            lines += ["", "[bold]Cost by Commit[/bold]",
+                      f"[dim]  {'Commit':<38} {'Sessions':>8} {'Input':>7} {'Output':>7} {'Cost':>9}[/dim]",
+                      f"[dim]  {'─'*38} {'─'*8} {'─'*7} {'─'*7} {'─'*9}[/dim]"]
+            for c in detail["commits_cost"]:
+                sha_label = f"[dim]{c['sha']}[/dim] " if c["sha"] != "—" else "  "
+                msg = escape(c["msg"])
+                # Truncate long messages
+                if len(c["msg"]) > 32:
+                    msg = escape(c["msg"][:31]) + "[dim]…[/dim]"
+                lines.append(
+                    f"  {sha_label}[cyan]{msg:<33}[/cyan]"
+                    f" [dim]{c['sessions']:>5}[/dim]"
+                    f" [yellow]{_fmt_tok(c['input']):>7}[/yellow]"
+                    f" [green]{_fmt_tok(c['output']):>7}[/green]"
+                    f" [magenta]{'${:.4f}'.format(c['cost']):>9}[/magenta]"
+                )
+
+        if detail["sessions"]:
+            lines += ["", "[bold]Sessions  (recent first)[/bold]",
+                      f"[dim]  {'Date':<17} {'In':>6} {'Out':>6} {'Cost':>9}[/dim]",
+                      f"[dim]  {'─'*17} {'─'*6} {'─'*6} {'─'*9}[/dim]"]
+            for s in detail["sessions"][:15]:
+                u = s["usage"]
+                lines.append(
+                    f"  [dim]{s['date']:<17}[/dim]"
+                    f" [yellow]{_fmt_tok(u['input']):>6}[/yellow]"
+                    f" [green]{_fmt_tok(u['output']):>6}[/green]"
+                    f" [magenta]{'${:.4f}'.format(s['cost']):>9}[/magenta]"
+                )
+        self.update("\n".join(lines))
 
 
 # ── app ───────────────────────────────────────────────────────────────────────
@@ -242,49 +585,44 @@ class GitDashboard(App):
     Footer > .footer--description { color: #778; }
     Footer > .footer--highlight { background: #2a3560; color: #fff; }
 
-    #left-panel {
-        width: 38;
-        border: solid #1e2540;
-        background: #0b0f1e;
-    }
-    #section-title {
-        background: #0f1428;
-        color: #00d4ff;
-        padding: 0 1;
-        text-style: bold;
-    }
+    #left-panel { width: 38; border: solid #1e2540; background: #0b0f1e; }
+    #section-title { background: #0f1428; color: #00d4ff; padding: 0 1; text-style: bold; }
+
     ListView { background: #0b0f1e; }
     ListItem { background: #0b0f1e; color: #c0c8e0; padding: 0; }
     ListItem:hover { background: #141a30; }
     ListItem.--highlight { background: #1a2245; }
-    ListItem.-disabled { background: #0b0f1e; opacity: 0.6; padding: 0; }
+    ListItem.-disabled { background: #0b0f1e; padding: 0; }
+    SectionHeader { background: #0f1428; padding: 0; border-top: solid #1e2540; }
+    SectionHeader Label { padding: 0 1; color: #445; }
 
     #right-panel { border: solid #1e2540; background: #0b0f1e; }
     TabbedContent { background: #0b0f1e; }
     TabPane { padding: 1 2; background: #0b0f1e; color: #c0c8e0; }
-    StatusTab, LogTab, GraphTab, DocTab { color: #c0c8e0; }
+    StatusTab, LogTab, GraphTab, DocTab, TokenGlobal { color: #c0c8e0; }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("f", "toggle_featured", "★ Featured", show=True),
-        Binding("1", "show_tab", "Status", show=True),
-        Binding("2", "show_tab", "Log", show=True),
-        Binding("3", "show_tab", "Graph", show=True),
-        Binding("4", "show_tab", "PRD", show=True),
-        Binding("5", "show_tab", "TODO", show=True),
-        Binding("6", "show_tab", "DECISION", show=True),
         Binding("r", "refresh_all", "Refresh", show=True),
         Binding("n", "section_next", "Next section", show=True),
         Binding("p", "section_prev", "Prev section", show=True),
     ]
 
+    _TAB_MAP = {
+        "1": "tab-status", "2": "tab-log", "3": "tab-graph",
+        "4": "tab-prd", "5": "tab-todo", "6": "tab-decision", "7": "tab-tokens",
+    }
+    _DOC_MAP = {
+        "tab-prd": "#prd-view", "tab-todo": "#todo-view", "tab-decision": "#decision-view"
+    }
+
     def __init__(self):
         super().__init__()
         self.featured = load_featured()
-        self.projects = get_projects()
+        self.projects: list[Path] = []
         self.project_infos: dict = {}
-        self._current_project: Path | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -312,6 +650,9 @@ class GitDashboard(App):
                     with TabPane("DECISION [6]", id="tab-decision"):
                         with ScrollableContainer(id="scroll-decision"):
                             yield DocTab("DECISION", id="decision-view", markup=True)
+                    with TabPane("Tokens [7]", id="tab-tokens"):
+                        with ScrollableContainer(id="scroll-tokens-global"):
+                            yield TokenGlobal(id="tokens-global", markup=True)
         yield Footer()
 
     def on_mount(self):
@@ -320,35 +661,54 @@ class GitDashboard(App):
         self.load_projects()
 
     def load_projects(self):
+        self.projects = get_projects()
         lv = self.query_one("#project-list", ListView)
         lv.clear()
         self.project_infos = {}
+
         featured_p = [p for p in self.projects if p.name in self.featured]
         other_p = [p for p in self.projects if p.name not in self.featured]
-        for p in featured_p + other_p:
-            self.project_infos[p.name] = get_project_info(p)
+
         if featured_p:
-            lv.append(ListItem(Label(" [gold1]★ FEATURED[/gold1]", markup=True), disabled=True))
+            lv.append(SectionHeader(" ★  FEATURED"))
             for p in featured_p:
-                info = self.project_infos[p.name]
-                lv.append(ProjectItem(p.name, info["branch"], info["changes"], True))
+                lv.append(ProjectItem(p.name, "…", 0, True))
         if other_p:
-            lv.append(ListItem(Label(" [dim]─ PROJECTS[/dim]", markup=True), disabled=True))
+            lv.append(SectionHeader(" ─  PROJECTS"))
             for p in other_p:
-                info = self.project_infos[p.name]
-                lv.append(ProjectItem(p.name, info["branch"], info["changes"], False))
+                lv.append(ProjectItem(p.name, "…", 0, False))
+
         for i, item in enumerate(lv._nodes):
             if hasattr(item, "project_name"):
                 lv.index = i
-                self._show_detail(item.project_name)
                 break
+
+        self._load_git_info_worker(featured_p + other_p)
+
+    @work(thread=True)
+    def _load_git_info_worker(self, projects: list[Path]):
+        for p in projects:
+            info = get_project_info(p)
+            self.call_from_thread(self._update_project_item, p.name, info)
+
+    def _update_project_item(self, name: str, info: dict):
+        self.project_infos[name] = info
+        lv = self.query_one("#project-list", ListView)
+        for item in lv._nodes:
+            if hasattr(item, "project_name") and item.project_name == name:
+                item.branch = info["branch"]
+                item.changes = info["changes"]
+                item.refresh_label()
+                break
+        highlighted = lv.highlighted_child
+        if highlighted and getattr(highlighted, "project_name", None) == name:
+            self._show_detail(name)
 
     def _show_detail(self, name: str):
         info = self.project_infos.get(name)
-        path = PROJECTS_DIR / name
-        self._current_project = path
         if not info:
             return
+        path = PROJECTS_DIR / name
         self.query_one("#status-view", StatusTab).update_info(name, info)
         self.query_one("#log-view", LogTab).update_info(info)
         self.query_one("#graph-view", GraphTab).update_info(info)
@@ -359,12 +719,33 @@ class GitDashboard(App):
     @on(ListView.Highlighted)
     def on_list_highlighted(self, event: ListView.Highlighted):
         if event.item and hasattr(event.item, "project_name"):
-            self._show_detail(event.item.project_name)
+            name = event.item.project_name
+            self._show_detail(name)
+            active = self.query_one("#tabs", TabbedContent).active
+            if active == "tab-tokens":
+                self._load_project_tokens_worker(name)
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated):
+        if event.tab and event.tab.id == "tab-tokens":
+            self._load_tokens_worker()
+
+    def on_key(self, event):
+        if event.key in self._TAB_MAP:
+            self.query_one("#tabs", TabbedContent).active = self._TAB_MAP[event.key]
+        elif event.key == "n":
+            self._doc_action("jump_next")
+        elif event.key == "p":
+            self._doc_action("jump_prev")
+
+    def _doc_action(self, method: str):
+        active = self.query_one("#tabs", TabbedContent).active
+        if active in self._DOC_MAP:
+            getattr(self.query_one(self._DOC_MAP[active], DocTab), method)()
 
     def action_toggle_featured(self):
         lv = self.query_one("#project-list", ListView)
-        if lv.highlighted_child and hasattr(lv.highlighted_child, "project_name"):
-            name = lv.highlighted_child.project_name
+        name = getattr(lv.highlighted_child, "project_name", None)
+        if name:
             self.featured.discard(name) if name in self.featured else self.featured.add(name)
             save_featured(self.featured)
             self.load_projects()
@@ -373,35 +754,30 @@ class GitDashboard(App):
         self.load_projects()
         self.notify("Refreshed")
 
-    def action_show_tab(self, tab_id: str = ""):
-        # Called via number key bindings — map key to tab id
-        key_map = {"1": "tab-status", "2": "tab-log", "3": "tab-graph",
-                   "4": "tab-prd", "5": "tab-todo", "6": "tab-decision"}
-        # tab_id comes from binding parameter workaround — use pressed key instead
-        pass
+    @work(thread=True)
+    def _load_tokens_worker(self):
+        self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).show_loading)
+        # If a project is already selected, show its detail; otherwise show global
+        lv = self.query_one("#project-list", ListView)
+        selected = getattr(lv.highlighted_child, "project_name", None)
+        if selected:
+            detail = parse_project_detail(selected)
+            self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, selected)
+        else:
+            data = parse_token_data()
+            self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_global, data)
 
-    def on_key(self, event):
-        tab_map = {"1": "tab-status", "2": "tab-log", "3": "tab-graph",
-                   "4": "tab-prd", "5": "tab-todo", "6": "tab-decision"}
-        if event.key in tab_map:
-            self.query_one("#tabs", TabbedContent).active = tab_map[event.key]
-        elif event.key == "n":
-            self._active_doc_tab_action("jump_next")
-        elif event.key == "p":
-            self._active_doc_tab_action("jump_prev")
-
-    def _active_doc_tab_action(self, method: str):
-        active = self.query_one("#tabs", TabbedContent).active
-        doc_map = {"tab-prd": "#prd-view", "tab-todo": "#todo-view", "tab-decision": "#decision-view"}
-        if active in doc_map:
-            widget = self.query_one(doc_map[active], DocTab)
-            getattr(widget, method)()
+    @work(thread=True)
+    def _load_project_tokens_worker(self, project_name: str):
+        self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).show_loading)
+        detail = parse_project_detail(project_name)
+        self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, project_name)
 
     def action_section_next(self):
-        self._active_doc_tab_action("jump_next")
+        self._doc_action("jump_next")
 
     def action_section_prev(self):
-        self._active_doc_tab_action("jump_prev")
+        self._doc_action("jump_prev")
 
 
 if __name__ == "__main__":
