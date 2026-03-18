@@ -161,6 +161,7 @@ def _parse_jsonl_dir(project_dir: Path) -> tuple[dict, dict[str, int], list[dict
     for fpath in set(list(project_dir.glob("*.jsonl")) + list(project_dir.glob("**/*.jsonl"))):
         s_usage = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
         s_tools: dict[str, int] = {}
+        s_agents: dict[str, int] = {}
         s_ts = None
         try:
             with open(fpath, errors="replace") as f:
@@ -185,6 +186,9 @@ def _parse_jsonl_dir(project_dir: Path) -> tuple[dict, dict[str, int], list[dict
                             if isinstance(c, dict) and c.get("type") == "tool_use":
                                 n = c.get("name", "?")
                                 s_tools[n] = s_tools.get(n, 0) + 1
+                                if n == "Agent":
+                                    agent_type = c.get("input", {}).get("subagent_type", "unknown")
+                                    s_agents[agent_type] = s_agents.get(agent_type, 0) + 1
         except Exception:
             continue
 
@@ -201,6 +205,7 @@ def _parse_jsonl_dir(project_dir: Path) -> tuple[dict, dict[str, int], list[dict
             "usage": s_usage,
             "cost": _compute_cost(s_usage),
             "tools": s_tools,
+            "agents": s_agents,
             "date": s_ts[:16].replace("T", " ") if s_ts else "—",
             "raw_ts": s_ts or "",
         })
@@ -234,11 +239,13 @@ def _correlate_commits(project_path: Path, sessions: list[dict]) -> list[dict]:
         label = matched["msg"] if matched else "(uncommitted work)"
         if key not in groups:
             groups[key] = {"sha": key[:7] if matched else "—", "msg": label, "sessions": 0, "cost": 0.0,
-                           "input": 0, "output": 0}
+                           "input": 0, "output": 0, "agents": {}}
         groups[key]["sessions"] += 1
         groups[key]["cost"] += s["cost"]
         groups[key]["input"] += s["usage"]["input"]
         groups[key]["output"] += s["usage"]["output"]
+        for a, cnt in s.get("agents", {}).items():
+            groups[key]["agents"][a] = groups[key]["agents"].get(a, 0) + cnt
 
     return sorted(groups.values(), key=lambda x: -x["cost"])
 
@@ -492,6 +499,12 @@ class TokenGlobal(Static):
             f"  [bold magenta]Total cost   {'${:.4f}'.format(total_cost):>8}[/bold magenta]",
         ]
 
+    def _fmt_agents(self, agents: dict) -> str:
+        if not agents:
+            return ""
+        parts = [f"{escape(a)}×{c}" for a, c in sorted(agents.items(), key=lambda x: -x[1])]
+        return "  [dim]agents:[/dim] [cyan]" + "  ".join(parts) + "[/cyan]"
+
     def _tools_lines(self, tools: dict) -> list[str]:
         if not tools:
             return []
@@ -558,6 +571,9 @@ class TokenGlobal(Static):
                     f" [green]{_fmt_tok(c['output']):>7}[/green]"
                     f" [magenta]{'${:.4f}'.format(c['cost']):>9}[/magenta]"
                 )
+                agent_str = self._fmt_agents(c.get("agents", {}))
+                if agent_str:
+                    lines.append(agent_str)
 
         if detail["sessions"]:
             lines += ["", "[bold]Sessions  (recent first)[/bold]",
@@ -571,6 +587,9 @@ class TokenGlobal(Static):
                     f" [green]{_fmt_tok(u['output']):>6}[/green]"
                     f" [magenta]{'${:.4f}'.format(s['cost']):>9}[/magenta]"
                 )
+                agent_str = self._fmt_agents(s.get("agents", {}))
+                if agent_str:
+                    lines.append(agent_str)
         self.update("\n".join(lines))
 
 
