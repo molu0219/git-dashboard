@@ -1,9 +1,10 @@
 # git-dashboard
 
-A terminal dashboard for developers managing **multiple Git repositories**.
-Get an instant read on every project's status, recent commits, and planning docs — without switching directories.
+When you're working with AI coding assistants — Claude Code, Cursor, Copilot, or any agent-driven workflow — the AI moves fast. Tabs multiply. Context switches constantly. It's easy to lose track of what's actually been changed, which branch you're on, or where a project stands.
 
-> **Scope:** Read-only overview. For actual Git operations (commit, merge, rebase), use your terminal or [lazygit](https://github.com/jesseduffield/lazygit).
+**git-dashboard** is a terminal TUI built for exactly this: a human-readable view of all your Git projects at once. While the AI writes code, you stay oriented — seeing live status, recent commits, and project planning docs without leaving the terminal or breaking your flow.
+
+> **Scope:** Read-only overview. For actual Git operations (commit, push, merge), use your terminal or [lazygit](https://github.com/jesseduffield/lazygit).
 
 ---
 
