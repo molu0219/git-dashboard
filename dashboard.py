@@ -611,6 +611,7 @@ class GitDashboard(App):
     ListItem { background: #0b0f1e; color: #c0c8e0; padding: 0; }
     ListItem:hover { background: #141a30; }
     ListItem.--highlight { background: #1a2245; color: #00d4ff; text-style: bold; }
+    ListItem.selected { background: #1a2245; color: #00d4ff; text-style: bold; }
     ListItem.-disabled { background: #0b0f1e; padding: 0; }
     SectionHeader { background: #0f1428; padding: 0; border-top: solid #1e2540; }
     SectionHeader Label { padding: 0 1; color: #445; }
@@ -738,6 +739,9 @@ class GitDashboard(App):
     @on(ListView.Highlighted)
     def on_list_highlighted(self, event: ListView.Highlighted):
         if event.item and hasattr(event.item, "project_name"):
+            for item in self.query("#project-list ProjectItem"):
+                item.remove_class("selected")
+            event.item.add_class("selected")
             name = event.item.project_name
             self._show_detail(name)
             active = self.query_one("#tabs", TabbedContent).active
