@@ -43,6 +43,8 @@ def load_config() -> Path:
 
 PROJECTS_DIR = load_config()
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CLAUDE_STATS_CACHE = Path.home() / ".claude" / "stats-cache.json"
+CLAUDE_SESSION_META_DIR = Path.home() / ".claude" / "usage-data" / "session-meta"
 
 # Token pricing per million (claude-sonnet-4-6) — update if model changes
 TOKEN_PRICE = {
@@ -109,6 +111,37 @@ def get_project_info(path: Path) -> dict:
         "diff_unstaged": run_git(path, ["diff", "--stat"]),
         "log_pretty": run_git(path, ["log", "--pretty=format:%h|%an|%ar|%s", "-10"]),
     }
+
+
+# ── Claude stats helpers ──────────────────────────────────────────────────────
+
+def parse_stats_cache() -> dict | None:
+    """Parse ~/.claude/stats-cache.json for global usage stats."""
+    if not CLAUDE_STATS_CACHE.exists():
+        return None
+    try:
+        return json.loads(CLAUDE_STATS_CACHE.read_text())
+    except Exception:
+        return None
+
+
+def parse_session_metas(project_path: str | None = None) -> list[dict]:
+    """Parse session-meta/*.json, optionally filter by project_path."""
+    if not CLAUDE_SESSION_META_DIR.exists():
+        return []
+    metas = []
+    for f in CLAUDE_SESSION_META_DIR.iterdir():
+        if not f.suffix == ".json":
+            continue
+        try:
+            m = json.loads(f.read_text())
+            if project_path and m.get("project_path") != project_path:
+                continue
+            metas.append(m)
+        except Exception:
+            continue
+    metas.sort(key=lambda x: x.get("start_time", ""), reverse=True)
+    return metas
 
 
 # ── token consumption helpers ─────────────────────────────────────────────────
@@ -544,7 +577,7 @@ class UsageSummary(Static):
     def show_loading(self):
         self.update("[dim]Loading…[/dim]")
 
-    def load_data(self, data: dict):
+    def load_data(self, data: dict, stats: dict | None = None):
         if "error" in data:
             self.update("")
             return
@@ -560,6 +593,14 @@ class UsageSummary(Static):
             f"  [dim]Total[/dim]   [bold magenta]{'${:.2f}'.format(total_cost):>7}[/bold magenta] [dim]{total_sessions:>3}s[/dim]",
             f"  [dim]Projects[/dim] [cyan]{num_projects:>4}[/cyan]",
         ]
+        if stats:
+            total_msgs = stats.get("totalMessages", 0)
+            lines.append(f"  [dim]Messages[/dim] [cyan]{total_msgs:>4}[/cyan]")
+            # Model breakdown
+            for model, mu in stats.get("modelUsage", {}).items():
+                short = model.replace("claude-", "")
+                out_tok = mu.get("outputTokens", 0)
+                lines.append(f"  [dim]{short}[/dim] [green]{_fmt_tok(out_tok):>6}[/green] [dim]out[/dim]")
         self.update("\n".join(lines))
 
 
@@ -592,17 +633,42 @@ class TokenGlobal(Static):
             lines.append(f"  [cyan]{escape(tool):<26}[/cyan] [dim]{count:>4}  {bar}[/dim]")
         return lines
 
-    def load_global(self, data: dict):
+    def load_global(self, data: dict, stats: dict | None = None):
         if "error" in data:
             self.update(f"[red]{escape(data['error'])}[/red]")
             return
         g = data["global"]
+        total_msgs = stats.get("totalMessages", 0) if stats else 0
         lines = [
-            f"[bold cyan]Global Summary[/bold cyan]  [dim]{data['sessions']} sessions · {len(data['projects'])} projects[/dim]",
+            f"[bold cyan]Global Summary[/bold cyan]  [dim]{data['sessions']} sessions · {len(data['projects'])} projects · {total_msgs} messages[/dim]",
             "[dim]Select a project on the left to see its detail.[/dim]",
             "",
         ]
         lines += self._usage_lines(g, data["total_cost"])
+
+        # Model breakdown from stats-cache
+        if stats and stats.get("modelUsage"):
+            lines += ["", "[bold]Model Usage[/bold]"]
+            for model, mu in stats["modelUsage"].items():
+                short = model.replace("claude-", "")
+                inp = _fmt_tok(mu.get("inputTokens", 0))
+                out = _fmt_tok(mu.get("outputTokens", 0))
+                cr = _fmt_tok(mu.get("cacheReadInputTokens", 0))
+                cw = _fmt_tok(mu.get("cacheCreationInputTokens", 0))
+                lines.append(f"  [cyan]{short:<18}[/cyan] [yellow]in:{inp:>7}[/yellow] [green]out:{out:>7}[/green] [blue]cw:{cw:>7}[/blue] [dim]cr:{cr:>7}[/dim]")
+
+        # Active hours from stats-cache
+        if stats and stats.get("hourCounts"):
+            hc = stats["hourCounts"]
+            max_h = max(hc.values()) if hc else 1
+            lines += ["", "[bold]Active Hours[/bold]"]
+            for h in range(24):
+                c = hc.get(str(h), 0)
+                if c == 0:
+                    continue
+                bar = "█" * int(c / max_h * 12)
+                lines.append(f"  [dim]{h:02d}:00[/dim]  [cyan]{bar:<12}[/cyan] [dim]{c}[/dim]")
+
         lines += self._tools_lines(data["tools"])
 
         if data["projects"]:
@@ -620,12 +686,19 @@ class TokenGlobal(Static):
                 )
         self.update("\n".join(lines))
 
-    def load_project(self, detail: dict | None, project_name: str):
+    def load_project(self, detail: dict | None, project_name: str, session_metas: list | None = None):
         if detail is None:
             self.update(f"[dim]No Claude session data found for[/dim] [cyan]{escape(project_name)}[/cyan]")
             return
+        # Session meta stats
+        meta_info = ""
+        if session_metas:
+            total_mins = sum(m.get("duration_minutes", 0) for m in session_metas)
+            total_msgs = sum(m.get("user_message_count", 0) + m.get("assistant_message_count", 0) for m in session_metas)
+            total_commits = sum(m.get("git_commits", 0) for m in session_metas)
+            meta_info = f" · {total_mins}min · {total_msgs} msgs · {total_commits} commits"
         lines = [
-            f"[bold cyan]{escape(detail['name'])}[/bold cyan]  [dim]{len(detail['sessions'])} sessions[/dim]",
+            f"[bold cyan]{escape(detail['name'])}[/bold cyan]  [dim]{len(detail['sessions'])} sessions{meta_info}[/dim]",
             "",
         ]
         lines += self._usage_lines(detail["usage"], detail["cost"])
@@ -903,7 +976,8 @@ class GitDashboard(App):
     def _load_usage_summary_worker(self):
         self.call_from_thread(self.query_one("#usage-summary", UsageSummary).show_loading)
         data = parse_token_data()
-        self.call_from_thread(self.query_one("#usage-summary", UsageSummary).load_data, data)
+        stats = parse_stats_cache()
+        self.call_from_thread(self.query_one("#usage-summary", UsageSummary).load_data, data, stats)
 
     @work(thread=True)
     def _load_tokens_worker(self):
@@ -913,17 +987,22 @@ class GitDashboard(App):
         if selected:
             global_data = parse_token_data()
             detail = parse_project_detail(selected, global_data)
-            self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, selected)
+            project_path = str(PROJECTS_DIR / selected)
+            metas = parse_session_metas(project_path)
+            self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, selected, metas)
         else:
             data = parse_token_data()
-            self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_global, data)
+            stats = parse_stats_cache()
+            self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_global, data, stats)
 
     @work(thread=True)
     def _load_project_tokens_worker(self, project_name: str):
         self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).show_loading)
         global_data = parse_token_data()
         detail = parse_project_detail(project_name, global_data)
-        self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, project_name)
+        project_path = str(PROJECTS_DIR / project_name)
+        metas = parse_session_metas(project_path)
+        self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, project_name, metas)
 
     def action_section_next(self):
         self._doc_action("jump_next")
