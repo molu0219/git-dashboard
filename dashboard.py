@@ -113,7 +113,7 @@ def get_project_info(path: Path) -> dict:
     }
 
 
-# ── Claude stats helpers ──────────────────────────────────────────────────────
+# ── Claude stats helpers (stats-cache.json + session-meta) ────────────────────
 
 def parse_stats_cache() -> dict | None:
     """Parse ~/.claude/stats-cache.json for global usage stats."""
