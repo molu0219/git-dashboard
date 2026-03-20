@@ -11,6 +11,7 @@ import os
 import json
 import re
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rich.markup import escape
@@ -272,6 +273,7 @@ def parse_token_data() -> dict:
         return {"error": f"{CLAUDE_PROJECTS_DIR} not found"}
 
     all_projects = []
+    all_sessions: list[dict] = []
     g_usage = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
     g_tools: dict[str, int] = {}
     g_sessions = 0
@@ -287,6 +289,7 @@ def parse_token_data() -> dict:
         for t, c in tools.items():
             g_tools[t] = g_tools.get(t, 0) + c
         g_sessions += len(sessions)
+        all_sessions.extend(sessions)
         latest_ts = sessions[0]["date"] if sessions else None
         all_projects.append({
             "name": _decode_project_name(project_dir.name),
@@ -297,12 +300,32 @@ def parse_token_data() -> dict:
         })
 
     all_projects.sort(key=lambda x: -x["cost"])
+
+    # Date-grouped usage summary (today / 7d / 30d)
+    now = datetime.now(timezone.utc)
+    cutoffs = {"today": now.replace(hour=0, minute=0, second=0, microsecond=0),
+               "week": now - timedelta(days=7),
+               "month": now - timedelta(days=30)}
+    period_stats: dict[str, dict] = {k: {"cost": 0.0, "sessions": 0} for k in cutoffs}
+    for s in all_sessions:
+        if not s.get("raw_ts"):
+            continue
+        try:
+            ts = datetime.fromisoformat(s["raw_ts"].replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        for period, cutoff in cutoffs.items():
+            if ts >= cutoff:
+                period_stats[period]["cost"] += s["cost"]
+                period_stats[period]["sessions"] += 1
+
     return {
         "global": g_usage,
         "total_cost": _compute_cost(g_usage),
         "sessions": g_sessions,
         "tools": dict(sorted(g_tools.items(), key=lambda x: -x[1])[:10]),
         "projects": all_projects,
+        "period_stats": period_stats,
     }
 
 
@@ -486,6 +509,29 @@ class DocTab(Static):
 
 
 
+class UsageSummary(Static):
+    def show_loading(self):
+        self.update("[dim]Loading…[/dim]")
+
+    def load_data(self, data: dict):
+        if "error" in data:
+            self.update("")
+            return
+        ps = data.get("period_stats", {})
+        total_cost = data.get("total_cost", 0)
+        total_sessions = data.get("sessions", 0)
+        num_projects = len(data.get("projects", []))
+        lines = [
+            "[bold dim]USAGE[/bold dim]",
+            f"  [dim]Today[/dim]   [magenta]{'${:.2f}'.format(ps.get('today', {}).get('cost', 0)):>7}[/magenta] [dim]{ps.get('today', {}).get('sessions', 0):>3}s[/dim]",
+            f"  [dim]Week[/dim]    [magenta]{'${:.2f}'.format(ps.get('week', {}).get('cost', 0)):>7}[/magenta] [dim]{ps.get('week', {}).get('sessions', 0):>3}s[/dim]",
+            f"  [dim]Month[/dim]   [magenta]{'${:.2f}'.format(ps.get('month', {}).get('cost', 0)):>7}[/magenta] [dim]{ps.get('month', {}).get('sessions', 0):>3}s[/dim]",
+            f"  [dim]Total[/dim]   [bold magenta]{'${:.2f}'.format(total_cost):>7}[/bold magenta] [dim]{total_sessions:>3}s[/dim]",
+            f"  [dim]Projects[/dim] [cyan]{num_projects:>4}[/cyan]",
+        ]
+        self.update("\n".join(lines))
+
+
 class TokenGlobal(Static):
     def show_loading(self):
         self.update("[dim]Loading…[/dim]")
@@ -620,6 +666,7 @@ class GitDashboard(App):
     TabbedContent { background: #0b0f1e; }
     TabPane { padding: 1 2; background: #0b0f1e; color: #c0c8e0; }
     StatusTab, LogTab, GraphTab, DocTab, TokenGlobal { color: #c0c8e0; }
+    #usage-summary { background: #0b0f1e; color: #c0c8e0; padding: 1 1 0 1; border-top: solid #1e2540; height: auto; }
     """
 
     BINDINGS = [
@@ -650,6 +697,7 @@ class GitDashboard(App):
             with Vertical(id="left-panel"):
                 yield Label(" Projects", id="section-title")
                 yield ListView(id="project-list")
+                yield UsageSummary(id="usage-summary", markup=True)
             with Vertical(id="right-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Status [1]", id="tab-status"):
@@ -679,6 +727,7 @@ class GitDashboard(App):
         self.title = "Git Dashboard"
         self.sub_title = str(PROJECTS_DIR)
         self.load_projects()
+        self._load_usage_summary_worker()
 
     def load_projects(self):
         self.projects = get_projects()
@@ -775,7 +824,14 @@ class GitDashboard(App):
 
     def action_refresh_all(self):
         self.load_projects()
+        self._load_usage_summary_worker()
         self.notify("Refreshed")
+
+    @work(thread=True)
+    def _load_usage_summary_worker(self):
+        self.call_from_thread(self.query_one("#usage-summary", UsageSummary).show_loading)
+        data = parse_token_data()
+        self.call_from_thread(self.query_one("#usage-summary", UsageSummary).load_data, data)
 
     @work(thread=True)
     def _load_tokens_worker(self):
