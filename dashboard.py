@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-git-dashboard — terminal dashboard for managing multiple Git repositories.
+git-dashboard — TUI dashboard for managing multiple Git repositories.
 
 Configuration (in priority order):
   1. Environment variable:  GIT_DASHBOARD_DIR=/path/to/projects gitdash
