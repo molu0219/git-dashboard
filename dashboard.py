@@ -251,20 +251,51 @@ def _correlate_commits(project_path: Path, sessions: list[dict]) -> list[dict]:
     return sorted(groups.values(), key=lambda x: -x["cost"])
 
 
-def parse_project_detail(project_name: str) -> dict | None:
+def parse_project_detail(project_name: str, global_data: dict | None = None) -> dict | None:
     d = find_project_claude_dir(project_name)
     if not d:
         return None
     usage, tools, sessions = _parse_jsonl_dir(d)
     project_path = PROJECTS_DIR / project_name
     commits_cost = _correlate_commits(project_path, sessions) if project_path.exists() else []
+    cost = _compute_cost(usage)
+
+    # Daily cost aggregation (last 14 days)
+    daily: dict[str, float] = {}
+    all_agents: dict[str, int] = {}
+    for s in sessions:
+        if s.get("raw_ts"):
+            day = s["raw_ts"][:10]
+            daily[day] = daily.get(day, 0) + s["cost"]
+        for a, cnt in s.get("agents", {}).items():
+            all_agents[a] = all_agents.get(a, 0) + cnt
+    daily_14d = []
+    for i in range(14):
+        d_str = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
+        daily_14d.append({"date": d_str[5:], "cost": daily.get(d_str, 0)})
+    daily_14d.reverse()
+
+    # Rank info
+    rank = None
+    decoded_name = _decode_project_name(d.name)
+    if global_data and "projects" in global_data:
+        total_cost = global_data.get("total_cost", 0)
+        for idx, p in enumerate(global_data["projects"]):
+            if p["name"] == decoded_name:
+                rank = {"pos": idx + 1, "total": len(global_data["projects"]),
+                        "pct": (cost / total_cost * 100) if total_cost else 0}
+                break
+
     return {
         "name": project_name,
         "usage": usage,
-        "cost": _compute_cost(usage),
+        "cost": cost,
         "tools": dict(sorted(tools.items(), key=lambda x: -x[1])[:10]),
         "sessions": sessions,
         "commits_cost": commits_cost,
+        "daily_14d": daily_14d,
+        "all_agents": dict(sorted(all_agents.items(), key=lambda x: -x[1])),
+        "rank": rank,
     }
 
 
@@ -598,6 +629,47 @@ class TokenGlobal(Static):
             "",
         ]
         lines += self._usage_lines(detail["usage"], detail["cost"])
+
+        # Averages
+        n_sessions = len(detail["sessions"])
+        if n_sessions:
+            avg_session = detail["cost"] / n_sessions
+            daily_14d = detail.get("daily_14d", [])
+            active_days = sum(1 for d in daily_14d if d["cost"] > 0)
+            avg_day = detail["cost"] / active_days if active_days else 0
+            lines += [
+                "",
+                "[bold]Averages[/bold]",
+                f"  [dim]Per session[/dim]   [magenta]${avg_session:.4f}[/magenta]",
+                f"  [dim]Per day[/dim]       [magenta]${avg_day:.4f}[/magenta]  [dim]({active_days} active days in 14d)[/dim]",
+            ]
+
+        # Daily trend (14 days)
+        daily_14d = detail.get("daily_14d", [])
+        if daily_14d and any(d["cost"] > 0 for d in daily_14d):
+            max_cost = max(d["cost"] for d in daily_14d) or 1
+            lines += ["", "[bold]Daily Trend  (14d)[/bold]"]
+            for d in daily_14d:
+                bar_len = int(d["cost"] / max_cost * 20) if max_cost else 0
+                bar = "█" * bar_len
+                cost_str = f"${d['cost']:.2f}" if d["cost"] > 0 else ""
+                lines.append(f"  [dim]{d['date']}[/dim]  [cyan]{bar:<20}[/cyan]  [magenta]{cost_str}[/magenta]")
+
+        # Agent types
+        all_agents = detail.get("all_agents", {})
+        if all_agents:
+            max_a = max(all_agents.values())
+            lines += ["", "[bold]Agent Types[/bold]"]
+            for agent, count in all_agents.items():
+                bar = "█" * int(count / max_a * 16)
+                lines.append(f"  [cyan]{escape(agent):<26}[/cyan] [dim]{count:>4}  {bar}[/dim]")
+
+        # Rank
+        rank = detail.get("rank")
+        if rank:
+            lines += ["", "[bold]Rank[/bold]",
+                       f"  [cyan]#{rank['pos']}[/cyan] of {rank['total']} projects  [dim]({rank['pct']:.1f}% of total spend)[/dim]"]
+
         lines += self._tools_lines(detail["tools"])
 
         if detail.get("commits_cost"):
@@ -836,11 +908,11 @@ class GitDashboard(App):
     @work(thread=True)
     def _load_tokens_worker(self):
         self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).show_loading)
-        # If a project is already selected, show its detail; otherwise show global
         lv = self.query_one("#project-list", ListView)
         selected = getattr(lv.highlighted_child, "project_name", None)
         if selected:
-            detail = parse_project_detail(selected)
+            global_data = parse_token_data()
+            detail = parse_project_detail(selected, global_data)
             self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, selected)
         else:
             data = parse_token_data()
@@ -849,7 +921,8 @@ class GitDashboard(App):
     @work(thread=True)
     def _load_project_tokens_worker(self, project_name: str):
         self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).show_loading)
-        detail = parse_project_detail(project_name)
+        global_data = parse_token_data()
+        detail = parse_project_detail(project_name, global_data)
         self.call_from_thread(self.query_one("#tokens-global", TokenGlobal).load_project, detail, project_name)
 
     def action_section_next(self):
