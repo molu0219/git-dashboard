@@ -80,10 +80,18 @@ STATUS_LABELS = {
 
 def get_projects() -> list[Path]:
     try:
-        return sorted(
-            [d for d in PROJECTS_DIR.iterdir() if d.is_dir() and (d / ".git").exists()],
-            key=lambda x: x.name,
-        )
+        found = []
+        for d in PROJECTS_DIR.iterdir():
+            if not d.is_dir():
+                continue
+            if (d / ".git").exists():
+                found.append(d)
+            else:
+                # Scan one level deeper for sub-projects
+                for sub in d.iterdir():
+                    if sub.is_dir() and (sub / ".git").exists():
+                        found.append(sub)
+        return sorted(found, key=lambda x: x.name)
     except Exception:
         return []
 
