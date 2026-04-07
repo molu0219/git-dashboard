@@ -537,16 +537,18 @@ class GraphTab(Static):
 
 
 class DocTab(Static):
-    def __init__(self, doc_id: str, **kwargs):
+    def __init__(self, doc_id: str, *, missing_msg: str | None = None, **kwargs):
         super().__init__(**kwargs)
         self._doc_id = doc_id
+        self._missing_msg = missing_msg
         self._headings: list[tuple[int, str]] = []
         self._heading_idx = 0
 
     def load(self, project_path: Path):
         md_file = project_path / f"{self._doc_id}.md"
         if not md_file.exists():
-            self.update(f"[dim]No {self._doc_id}.md in this project.[/dim]")
+            msg = self._missing_msg or f"No {self._doc_id}.md in this project."
+            self.update(f"[dim]{msg}[/dim]")
             self._headings = []
             return
         try:
@@ -832,10 +834,12 @@ class GitDashboard(App):
 
     _TAB_MAP = {
         "1": "tab-status", "2": "tab-log", "3": "tab-graph",
-        "4": "tab-prd", "5": "tab-todo", "6": "tab-decision", "7": "tab-tokens",
+        "4": "tab-claude", "5": "tab-spec", "6": "tab-kgraph",
+        "7": "tab-archive", "8": "tab-decision", "9": "tab-tokens",
     }
     _DOC_MAP = {
-        "tab-prd": "#prd-view", "tab-todo": "#todo-view", "tab-decision": "#decision-view"
+        "tab-spec": "#spec-view", "tab-kgraph": "#kgraph-view",
+        "tab-archive": "#archive-view", "tab-decision": "#decision-view", "tab-claude": "#claude-view",
     }
 
     def __init__(self):
@@ -862,16 +866,22 @@ class GitDashboard(App):
                     with TabPane("Graph [3]", id="tab-graph"):
                         with ScrollableContainer():
                             yield GraphTab(id="graph-view", markup=True)
-                    with TabPane("PRD [4]", id="tab-prd"):
-                        with ScrollableContainer(id="scroll-prd"):
-                            yield DocTab("PRD", id="prd-view", markup=True)
-                    with TabPane("TODO [5]", id="tab-todo"):
-                        with ScrollableContainer(id="scroll-todo"):
-                            yield DocTab("TODO", id="todo-view", markup=True)
-                    with TabPane("DECISION [6]", id="tab-decision"):
+                    with TabPane("CLAUDE [4]", id="tab-claude"):
+                        with ScrollableContainer(id="scroll-claude"):
+                            yield DocTab("CLAUDE", id="claude-view", markup=True)
+                    with TabPane("SPEC [5]", id="tab-spec"):
+                        with ScrollableContainer(id="scroll-spec"):
+                            yield DocTab("SPEC", id="spec-view", markup=True)
+                    with TabPane("KGraph [6]", id="tab-kgraph"):
+                        with ScrollableContainer(id="scroll-kgraph"):
+                            yield DocTab("graphify-out/GRAPH_REPORT", id="kgraph-view", markup=True, missing_msg="No graph — run /graphify in project to generate")
+                    with TabPane("Archive [7]", id="tab-archive"):
+                        with ScrollableContainer(id="scroll-archive"):
+                            yield DocTab("SPEC-archive", id="archive-view", markup=True)
+                    with TabPane("DECISION [8]", id="tab-decision"):
                         with ScrollableContainer(id="scroll-decision"):
                             yield DocTab("DECISION", id="decision-view", markup=True)
-                    with TabPane("Tokens [7]", id="tab-tokens"):
+                    with TabPane("Tokens [9]", id="tab-tokens"):
                         with ScrollableContainer(id="scroll-tokens-global"):
                             yield TokenGlobal(id="tokens-global", markup=True)
         yield Footer()
@@ -934,9 +944,11 @@ class GitDashboard(App):
         self.query_one("#status-view", StatusTab).update_info(name, info)
         self.query_one("#log-view", LogTab).update_info(info)
         self.query_one("#graph-view", GraphTab).update_info(info)
-        self.query_one("#prd-view", DocTab).load(path)
-        self.query_one("#todo-view", DocTab).load(path)
+        self.query_one("#spec-view", DocTab).load(path)
+        self.query_one("#kgraph-view", DocTab).load(path)
+        self.query_one("#archive-view", DocTab).load(path)
         self.query_one("#decision-view", DocTab).load(path)
+        self.query_one("#claude-view", DocTab).load(path)
 
     @on(ListView.Highlighted)
     def on_list_highlighted(self, event: ListView.Highlighted):
