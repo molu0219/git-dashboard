@@ -614,6 +614,165 @@ class UsageSummary(Static):
         self.update("\n".join(lines))
 
 
+class AgentsTab(Static):
+    """Tab 0: Show active agents, their tasks, and status from harness.jsonl + SPEC.md."""
+
+    def load(self, project_path: Path):
+        harness_log = Path.home() / ".claude" / "harness.jsonl"
+        spec_file = project_path / "SPEC.md"
+        project_name = project_path.name
+        lines = ["[bold cyan]Agents & Tasks[/bold cyan]", ""]
+
+        # Parse SPEC for task status
+        tasks = []
+        if spec_file.exists():
+            current_fid = ""
+            for line in spec_file.read_text(encoding="utf-8").splitlines():
+                m = re.match(r'^## (F\d+)', line)
+                if m:
+                    current_fid = m.group(1)
+                m2 = re.match(r'^- \[(.)\] (F\d+-T\d+): (.+)', line)
+                if m2:
+                    status_char, tid, desc = m2.group(1), m2.group(2), m2.group(3).strip()
+                    agent_m = re.search(r'@(\w+)', line)
+                    agent = agent_m.group(1) if agent_m else ""
+                    status_map = {" ": "todo", ">": "active", "?": "review", "!": "blocked", "x": "done", "✗": "failed", "-": "shelved"}
+                    status = status_map.get(status_char, status_char)
+                    tasks.append({"tid": tid, "desc": desc[:40], "status": status, "agent": agent, "fid": current_fid})
+
+        if not tasks:
+            self.update("[dim]No SPEC.md or no tasks found.[/dim]")
+            return
+
+        # Group by agent
+        agents = {}
+        for t in tasks:
+            a = t["agent"] or "unassigned"
+            agents.setdefault(a, []).append(t)
+
+        status_colors = {"todo": "dim", "active": "yellow", "review": "blue", "blocked": "red", "done": "green", "failed": "red bold", "shelved": "dim"}
+        status_icons = {"todo": "[ ]", "active": "[>]", "review": "[?]", "blocked": "[!]", "done": "[x]", "failed": "[✗]", "shelved": "[-]"}
+
+        for agent, agent_tasks in agents.items():
+            active = [t for t in agent_tasks if t["status"] == "active"]
+            done = [t for t in agent_tasks if t["status"] == "done"]
+            agent_color = "yellow" if active else "green" if len(done) == len(agent_tasks) else "dim"
+            lines.append(f"[{agent_color}]@{escape(agent)}[/{agent_color}]  ({len(done)}/{len(agent_tasks)} done)")
+            for t in agent_tasks:
+                sc = status_colors.get(t["status"], "dim")
+                icon = status_icons.get(t["status"], "?")
+                lines.append(f"  [{sc}]{icon} {t['tid']}: {escape(t['desc'])}[/{sc}]")
+            lines.append("")
+
+        # Recent events from harness.jsonl
+        if harness_log.exists():
+            try:
+                events = []
+                for line in harness_log.read_text().strip().splitlines()[-20:]:
+                    try:
+                        ev = json.loads(line)
+                        if ev.get("project") == project_name:
+                            events.append(ev)
+                    except Exception:
+                        pass
+                if events:
+                    lines.append("[bold]Recent Events[/bold]")
+                    for ev in events[-8:]:
+                        ts = ev.get("ts", "")[:19].replace("T", " ")
+                        event = ev.get("event", "")
+                        agent = ev.get("agent", "")
+                        extra = ""
+                        if "task" in ev:
+                            extra = f" {ev['task']}"
+                        if "diff_lines" in ev:
+                            extra += f" ({ev['diff_lines']} lines)"
+                        lines.append(f"  [dim]{ts}[/dim] [{agent_color}]{event}[/{agent_color}] @{agent}{extra}")
+            except Exception:
+                pass
+
+        self.update("\n".join(lines))
+
+
+class PipelineTab(Static):
+    """Tab -: Show product development pipeline from SPEC.md."""
+
+    def load(self, project_path: Path):
+        spec_file = project_path / "SPEC.md"
+        archive_file = project_path / "SPEC-archive.md"
+        decision_file = project_path / "DECISION.md"
+
+        lines = ["[bold cyan]Development Pipeline[/bold cyan]", ""]
+
+        # Count F groups and their status
+        groups = []
+        if spec_file.exists():
+            current_group = None
+            for line in spec_file.read_text(encoding="utf-8").splitlines():
+                m = re.match(r'^## (F\d+)\s+(.*)', line)
+                if m:
+                    if current_group:
+                        groups.append(current_group)
+                    current_group = {"id": m.group(1), "name": m.group(2).strip(), "done": 0, "total": 0, "has_contract": False}
+                if current_group:
+                    if re.match(r'^- \[x\]', line):
+                        current_group["done"] += 1
+                        current_group["total"] += 1
+                    elif re.match(r'^- \[[ >?!✗]\]', line):
+                        current_group["total"] += 1
+                    if "### Contract" in line:
+                        current_group["has_contract"] = True
+            if current_group:
+                groups.append(current_group)
+
+        # Archived count
+        archived_count = 0
+        if archive_file.exists():
+            archived_count = len(re.findall(r'^## F\d+', archive_file.read_text(), re.MULTILINE))
+
+        # Decision count
+        decision_count = 0
+        if decision_file.exists():
+            decision_count = len(re.findall(r'^## D\d+', decision_file.read_text(), re.MULTILINE))
+
+        # Pipeline view
+        if archived_count:
+            lines.append(f"[green]✓ Shipped: {archived_count} features archived[/green]")
+            lines.append("")
+
+        if not groups:
+            lines.append("[dim]No active features in SPEC.md[/dim]")
+        else:
+            for g in groups:
+                pct = int(g["done"] / g["total"] * 100) if g["total"] > 0 else 0
+                bar_filled = int(pct / 100 * 20)
+                bar = "█" * bar_filled + "░" * (20 - bar_filled)
+
+                if pct == 100:
+                    color = "green"
+                    phase = "REVIEW"
+                elif pct > 0:
+                    color = "yellow"
+                    phase = "BUILD"
+                else:
+                    color = "dim"
+                    phase = "PLAN"
+
+                contract = " [cyan]◆[/cyan]" if g["has_contract"] else ""
+                lines.append(f"[{color}]{g['id']} {escape(g['name'])}[/{color}]{contract}")
+                lines.append(f"  [{color}]{bar}[/{color}] {pct}%  ({g['done']}/{g['total']})  [dim]{phase}[/dim]")
+                lines.append("")
+
+        # Summary
+        total_tasks = sum(g["total"] for g in groups)
+        done_tasks = sum(g["done"] for g in groups)
+        lines.append(f"[bold]Summary[/bold]")
+        lines.append(f"  Features: {len(groups)} active + {archived_count} archived")
+        lines.append(f"  Tasks: {done_tasks}/{total_tasks} done")
+        lines.append(f"  Decisions: {decision_count}")
+
+        self.update("\n".join(lines))
+
+
 class TokenGlobal(Static):
     def show_loading(self):
         self.update("[dim]Loading…[/dim]")
@@ -836,6 +995,7 @@ class GitDashboard(App):
         "1": "tab-status", "2": "tab-log", "3": "tab-graph",
         "4": "tab-claude", "5": "tab-spec", "6": "tab-kgraph",
         "7": "tab-archive", "8": "tab-decision", "9": "tab-tokens",
+        "0": "tab-agents", "minus": "tab-pipeline",
     }
     _DOC_MAP = {
         "tab-spec": "#spec-view", "tab-kgraph": "#kgraph-view",
@@ -884,6 +1044,12 @@ class GitDashboard(App):
                     with TabPane("Tokens [9]", id="tab-tokens"):
                         with ScrollableContainer(id="scroll-tokens-global"):
                             yield TokenGlobal(id="tokens-global", markup=True)
+                    with TabPane("Agents [0]", id="tab-agents"):
+                        with ScrollableContainer(id="scroll-agents"):
+                            yield AgentsTab(id="agents-view", markup=True)
+                    with TabPane("Pipeline [-]", id="tab-pipeline"):
+                        with ScrollableContainer(id="scroll-pipeline"):
+                            yield PipelineTab(id="pipeline-view", markup=True)
         yield Footer()
 
     def on_mount(self):
@@ -949,6 +1115,8 @@ class GitDashboard(App):
         self.query_one("#archive-view", DocTab).load(path)
         self.query_one("#decision-view", DocTab).load(path)
         self.query_one("#claude-view", DocTab).load(path)
+        self.query_one("#agents-view", AgentsTab).load(path)
+        self.query_one("#pipeline-view", PipelineTab).load(path)
 
     @on(ListView.Highlighted)
     def on_list_highlighted(self, event: ListView.Highlighted):
