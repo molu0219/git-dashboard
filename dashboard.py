@@ -977,6 +977,8 @@ class GitDashboard(App):
     SectionHeader Label { padding: 0 1; color: #445; }
 
     #right-panel { border: solid #1e2540; background: #0b0f1e; }
+    #pipeline-bar { height: 1; padding: 0 1; background: #0d1225; color: #c0c8e0; }
+    #agents-bar { height: 1; padding: 0 1; background: #0d1225; color: #c0c8e0; }
     TabbedContent { background: #0b0f1e; }
     TabPane { padding: 1 2; background: #0b0f1e; color: #c0c8e0; }
     StatusTab, LogTab, GraphTab, DocTab, TokenGlobal { color: #c0c8e0; }
@@ -995,7 +997,6 @@ class GitDashboard(App):
         "1": "tab-status", "2": "tab-log", "3": "tab-graph",
         "4": "tab-claude", "5": "tab-spec", "6": "tab-kgraph",
         "7": "tab-archive", "8": "tab-decision", "9": "tab-tokens",
-        "0": "tab-agents", "minus": "tab-pipeline",
     }
     _DOC_MAP = {
         "tab-spec": "#spec-view", "tab-kgraph": "#kgraph-view",
@@ -1016,6 +1017,8 @@ class GitDashboard(App):
                 yield ListView(id="project-list")
                 yield UsageSummary(id="usage-summary", markup=True)
             with Vertical(id="right-panel"):
+                yield Static(id="pipeline-bar", markup=True)
+                yield Static(id="agents-bar", markup=True)
                 with TabbedContent(id="tabs"):
                     with TabPane("Status [1]", id="tab-status"):
                         with ScrollableContainer():
@@ -1044,12 +1047,6 @@ class GitDashboard(App):
                     with TabPane("Tokens [9]", id="tab-tokens"):
                         with ScrollableContainer(id="scroll-tokens-global"):
                             yield TokenGlobal(id="tokens-global", markup=True)
-                    with TabPane("Agents [0]", id="tab-agents"):
-                        with ScrollableContainer(id="scroll-agents"):
-                            yield AgentsTab(id="agents-view", markup=True)
-                    with TabPane("Pipeline [-]", id="tab-pipeline"):
-                        with ScrollableContainer(id="scroll-pipeline"):
-                            yield PipelineTab(id="pipeline-view", markup=True)
         yield Footer()
 
     def on_mount(self):
@@ -1115,8 +1112,60 @@ class GitDashboard(App):
         self.query_one("#archive-view", DocTab).load(path)
         self.query_one("#decision-view", DocTab).load(path)
         self.query_one("#claude-view", DocTab).load(path)
-        self.query_one("#agents-view", AgentsTab).load(path)
-        self.query_one("#pipeline-view", PipelineTab).load(path)
+        self._update_bars(path)
+
+    def _update_bars(self, project_path: Path):
+        spec_file = project_path / "SPEC.md"
+        # Pipeline bar
+        pipeline_parts = []
+        if spec_file.exists():
+            for line in spec_file.read_text(encoding="utf-8").splitlines():
+                m = re.match(r'^## (F\d+)\s+(.*)', line)
+                if m:
+                    fid, name = m.group(1), m.group(2).strip()[:20]
+                    pipeline_parts.append({"id": fid, "name": name, "done": 0, "total": 0})
+                if pipeline_parts:
+                    if re.match(r'^- \[x\]', line):
+                        pipeline_parts[-1]["done"] += 1
+                        pipeline_parts[-1]["total"] += 1
+                    elif re.match(r'^- \[[ >?!✗]\]', line):
+                        pipeline_parts[-1]["total"] += 1
+
+        if pipeline_parts:
+            bar_items = []
+            for g in pipeline_parts:
+                pct = int(g["done"] / g["total"] * 100) if g["total"] > 0 else 0
+                filled = int(pct / 100 * 8)
+                bar = "█" * filled + "░" * (8 - filled)
+                color = "green" if pct == 100 else "yellow" if pct > 0 else "dim"
+                bar_items.append(f"[{color}]{g['id']} {bar} {pct}%[/{color}]")
+            self.query_one("#pipeline-bar", Static).update(" [bold]Pipeline[/bold] " + "  ".join(bar_items))
+        else:
+            self.query_one("#pipeline-bar", Static).update("")
+
+        # Agents bar
+        agents = {}
+        if spec_file.exists():
+            for line in spec_file.read_text(encoding="utf-8").splitlines():
+                m = re.match(r'^- \[(.)\] (F\d+-T\d+).*?@(\w+)', line)
+                if m:
+                    status, tid, agent = m.group(1), m.group(2), m.group(3)
+                    agents.setdefault(agent, []).append({"status": status, "tid": tid})
+
+        if agents:
+            agent_items = []
+            for agent, tasks in agents.items():
+                active = [t for t in tasks if t["status"] == ">"]
+                done = [t for t in tasks if t["status"] == "x"]
+                if active:
+                    agent_items.append(f"[yellow]@{agent} [>]{active[0]['tid']}[/yellow]")
+                elif len(done) == len(tasks):
+                    agent_items.append(f"[green]@{agent} done[/green]")
+                else:
+                    agent_items.append(f"[dim]@{agent} idle[/dim]")
+            self.query_one("#agents-bar", Static).update(" [bold]Agents[/bold]   " + "  ".join(agent_items))
+        else:
+            self.query_one("#agents-bar", Static).update("")
 
     @on(ListView.Highlighted)
     def on_list_highlighted(self, event: ListView.Highlighted):
