@@ -1,3 +1,10 @@
+# Harness runtime — 順序不可動，理由見 ARCHITECTURE.md「文件契約」
+**/.harness/
+!/.harness/
+/.harness/*
+!/.harness/profile
+!/.harness/reviews/
+
 PRD.md
 TODO.md
 DECISION.md
